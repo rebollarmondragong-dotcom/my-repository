@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Duelo Dividido Pixel Art - Multijugador Online</title>
+<style>
+  :root{
+    --bg:#1a1714;
+    --panel:#26211c;
+    --line:#423930;
+    --text:#f0e6d2;
+    --muted:#a3927e;
+  }
+  *{box-sizing:border-box;}
+  html,body{
+    height:100%;
+    margin:0;
+    background:var(--bg);
+    color:var(--text);
+    font-family:'Courier New', monospace;
+    overflow:hidden;
+    image-rendering: pixelated;
+  }
+  #top{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    padding:8px 16px;
+    background:var(--panel);
+    border-bottom:4px solid var(--line);
+    font-size:13px;
+    font-weight:bold;
+  }
+  #stage{
+    width:100%;
+    height:calc(100% - 46px);
+    position:relative;
+  }
+  canvas{
+    display:block;
+    width:100%;
+    height:100%;
+    background:#c2a675;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+  }
+  .hud{
+    position:absolute;
+    top:12px;
+    left:12px;
+    right:12px;
+    display:flex;
+    justify-content:space-between;
+    pointer-events:none;
+    font-size:14px;
+    font-weight:bold;
+    text-shadow:2px 2px 0px #000;
+  }
+  .hud .weapon{font-weight:bold; color:#f0e6d2;}
+  .hud .ammo{color:#f1c40f; font-size:12px;}
+  .hud .grenades{color:#ff7700; font-size:12px;}
+  .hud .stats{color:#2ecc71; font-size:14px;}
+</style>
+<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+</head>
+<body>
+
+<div id="top">
+  <div>Jugadores conectados: <span id="playerCount">1</span></div>
+  <div id="title">Mover: WASD | Apuntar: Ratón | Disparar: Clic Izq | Granada: G | Recargar: R</div>
+</div>
+
+<div id="stage">
+  <canvas id="gameCanvas"></canvas>
+  <div class="hud">
+    <div>
+      <div class="weapon" id="wHUD">Pistola</div>
+      <div class="ammo" id="aHUD">12 / ∞</div>
+      <div class="grenades" id="gHUD">💣 x3</div>
+    </div>
+    <div class="stats" id="livesHUD">Vidas: ∞ | Salud: 100%</div>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  const socket = io();
+
+  const canvas = document.getElementById("gameCanvas");
+  const ctx = canvas.getContext("2d");
+
+  function resize(){
+    const stage = document.getElementById("stage");
+    canvas.width = stage.clientWidth;
+    canvas.height = stage.clientHeight;
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  const WEAPONS = {
+    pistol:  {name:"Glock-17", reloadTime:1100, maxAmmo:Infinity},
+    m4a1:    {name:"M4A1",     reloadTime:1900, maxAmmo:120},
+    ak47:    {name:"AK-47",    reloadTime:2100, maxAmmo:90},
+    scar:    {name:"SCAR-H",   reloadTime:2200, maxAmmo:80},
+    p90:     {name:"P90",      reloadTime:1800, maxAmmo:150},
+    m249:    {name:"M249 SAW", reloadTime:3600, maxAmmo:100},
+    shotgun: {name:"M4 Super", reloadTime:2400, maxAmmo:32},
+    sniper:  {name:"AWP 7.62", reloadTime:2300, maxAmmo:Infinity},
+    barrett: {name:"Barrett .50",reloadTime:3000, maxAmmo:15}
+  };
+
+  const keys = { up: false, down: false, left: false, right: false };
+  let mousePos = { x: 0, y: 0 };
+  let isShooting = false;
+  let mouseWorldAngle = 0;
+
+  window.addEventListener("keydown", e => {
+    if (e.code === "KeyW" || e.code === "ArrowUp") keys.up = true;
+    if (e.code === "KeyS" || e.code === "ArrowDown") keys.down = true;
+    if (e.code === "KeyA" || e.code === "ArrowLeft") keys.left = true;
+    if (e.code === "KeyD" || e.code === "ArrowRight") keys.right = true;
+    
+    if (e.code === "KeyR") socket.emit("reload");
+    if (e.code === "KeyG") socket.emit("throwGrenade");
+    sendInputs();
+  });
+
+  window.addEventListener("keyup", e => {
+    if (e.code === "KeyW" || e.code === "ArrowUp") keys.up = false;
+    if (e.code === "KeyS" || e.code === "ArrowDown") keys.down = false;
+    if (e.code === "KeyA" || e.code === "ArrowLeft") keys.left = false;
+    if (e.code === "KeyD" || e.code === "ArrowRight") keys.right = false;
+    sendInputs();
+  });
+
+  window.addEventListener("mousemove", e => {
+    const rect = canvas.getBoundingClientRect();
+    mousePos.x = e.clientX - rect.left;
+    mousePos.y = e.clientY - rect.top;
+    calculateAngle();
+    sendInputs();
+  });
+
+  window.addEventListener("mousedown", e => {
+    if (e.button === 0) { isShooting = true; sendInputs(); }
+  });
+
+  window.addEventListener("mouseup", e => {
+    if (e.button === 0) { isShooting = false; sendInputs(); }
+  });
+
+  function calculateAngle() {
+    if (!latestState || !latestState.players[socket.id]) return;
+    const me = latestState.players[socket.id];
+    const screenCenterX = canvas.width / 2;
+    const screenCenterY = canvas.height / 2;
+    mouseWorldAngle = Math.atan2(mousePos.y - screenCenterY, mousePos.x - screenCenterX);
+  }
+
+  function sendInputs() {
+    socket.emit("playerInput", {
+      up: keys.up,
+      down: keys.down,
+      left: keys.left,
+      right: keys.right,
+      shooting: isShooting,
+      angle: mouseWorldAngle
+    });
+  }
+
+  let latestState = null;
+
+  socket.on("gameState", state => {
+    latestState = state;
+    calculateAngle();
+    render();
+  });
+
+  function drawPixelRect(ctx, x, y, w, h, color, borderColor="#000"){
+    ctx.fillStyle = color;
+    ctx.fillRect(Math.floor(x), Math.floor(y), Math.floor(w), Math.floor(h));
+    if(borderColor){
+      ctx.strokeStyle = borderColor;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(Math.floor(x), Math.floor(y), Math.floor(w), Math.floor(h));
+    }
+  }
+
+  function render() {
+    if (!latestState) return;
+
+    const me = latestState.players[socket.id];
+    const viewW = canvas.width;
+    const viewH = canvas.height;
+
+    let camX = me ? me.x - viewW / 2 : 0;
+    let camY = me ? me.y - viewH / 2 : 0;
+
+    camX = Math.max(0, Math.min(latestState.world.w - viewW, camX));
+    camY = Math.max(0, Math.min(latestState.world.h - viewH, camY));
+
+    ctx.clearRect(0, 0, viewW, viewH);
+    ctx.save();
+    ctx.translate(-Math.floor(camX), -Math.floor(camY));
+
+    // Fondo
+    ctx.fillStyle = "#d4b27d";
+    ctx.fillRect(camX, camY, viewW, viewH);
+
+    // Casas
+    for(const h of latestState.houses){
+      ctx.fillStyle = h.floorColor;
+      ctx.fillRect(h.x, h.y, h.w, h.h);
+      ctx.strokeStyle = "#40372e"; ctx.lineWidth = 2;
+      ctx.strokeRect(h.x, h.y, h.w, h.h);
+    }
+
+    // Paredes del mapa
+    const WALL = 30;
+    const WORLD_W = latestState.world.w;
+    const WORLD_H = latestState.world.h;
+    drawPixelRect(ctx, 0, 0, WORLD_W, WALL, "#544637", "#241d16");
+    drawPixelRect(ctx, 0, WORLD_H-WALL, WORLD_W, WALL, "#544637", "#241d16");
+    drawPixelRect(ctx, 0, 0, WALL, WORLD_H, "#544637", "#241d16");
+    drawPixelRect(ctx, WORLD_W-WALL, 0, WALL, WORLD_H, "#544637", "#241d16");
+
+    // Obstáculos
+    for(const o of latestState.obstacles) {
+      drawPixelRect(ctx, o.x, o.y, o.w, o.h, "#786956", "#362f26");
+    }
+
+    // Rocas
+    for(const r of latestState.rocks){
+      drawPixelRect(ctx, r.x, r.y, r.w, r.h, "#a38d72", "#4a3e31");
+    }
+
+    // Arbustos
+    for(const b of latestState.bushes){
+      ctx.fillStyle = "#735d33"; ctx.fillRect(b.x, b.y, b.w, b.h);
+      ctx.fillStyle = "#8a7242"; ctx.fillRect(b.x+6, b.y+6, b.w-12, b.h-12);
+    }
+
+    // Cajas de armas
+    for(const c of latestState.crates){
+      if(!c.active) continue;
+      drawPixelRect(ctx, c.x-15, c.y-15, 30, 30, "#8a5a2b", "#3b220c");
+      ctx.fillStyle = "#f0d9b5";
+      ctx.font = "9px monospace";
+      ctx.textAlign = "center";
+      ctx.fillText(WEAPONS[c.weapon].name.slice(0,5), c.x, c.y+3);
+    }
+
+    // Cajas de suministros
+    for(const s of latestState.ammoSupplyBoxes){
+      if(!s.active) continue;
+      if(s.type === "ammo"){
+        drawPixelRect(ctx, s.x-13, s.y-13, 26, 26, "#2980b9", "#1a5276");
+        ctx.fillStyle = "#f1c40f"; ctx.font="10px monospace"; ctx.textAlign="center"; ctx.fillText("AMMO", s.x, s.y+3);
+      } else {
+        drawPixelRect(ctx, s.x-13, s.y-13, 26, 26, "#27ae60", "#1e8449");
+        ctx.fillStyle = "#fff"; ctx.font="10px monospace"; ctx.textAlign="center"; ctx.fillText("GREN", s.x, s.y+3);
+      }
+    }
+
+    // Botiquines
+    for(const m of latestState.medkits){
+      if(!m.active) continue;
+      drawPixelRect(ctx, m.x-13, m.y-13, 26, 26, "#ffffff", "#1e824c");
+      ctx.fillStyle = "#2ecc71";
+      ctx.fillRect(m.x - 3, m.y - 8, 6, 16);
+      ctx.fillRect(m.x - 8, m.y - 3, 16, 6);
+    }
+
+    // Granadas
+    for(const g of latestState.grenades){
+      drawPixelRect(ctx, g.x-4, g.y-4, 8, 8, "#2d5a27", "#000");
+    }
+
+    // Explosiones
+    for(const e of latestState.explosions){
+      ctx.fillStyle = "rgba(255, 90, 0, 0.65)";
+      ctx.beginPath(); ctx.arc(e.x, e.y, e.radius, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // Balas
+    for(const b of latestState.bullets){
+      drawPixelRect(ctx, b.x-3, b.y-3, 6, 6, b.color, "#000");
+    }
+
+    // Jugadores
+    const SIZE = 26;
+    let count = 0;
+    for(const id in latestState.players){
+      count++;
+      const pl = latestState.players[id];
+      if(!pl.alive) continue;
+
+      ctx.save();
+      ctx.translate(Math.floor(pl.x), Math.floor(pl.y));
+      ctx.rotate(pl.angle);
+
+      drawPixelRect(ctx, -SIZE/2, -SIZE/2, SIZE, SIZE, pl.color, "#000");
+      
+      // Arma simple apuntando al ratón
+      ctx.fillStyle = "#111";
+      ctx.fillRect(8, -2, 16, 4);
+
+      ctx.restore();
+
+      // Barra de vida
+      drawPixelRect(ctx, pl.x-16, pl.y-SIZE/2-10, 32, 6, "#000", null);
+      ctx.fillStyle = pl.color;
+      ctx.fillRect(Math.floor(pl.x-15), Math.floor(pl.y-SIZE/2-9), Math.floor(30*(pl.health/100)), 4);
+
+      if(pl.isReloading){
+        ctx.fillStyle = "#f1c40f";
+        ctx.font = "10px monospace";
+        ctx.textAlign = "center";
+        ctx.fillText("RECARGANDO...", pl.x, pl.y - SIZE/2 - 14);
+      }
+    }
+
+    ctx.restore();
+
+    // Actualizar HUD
+    document.getElementById("playerCount").textContent = count;
+    if(me){
+      const w = WEAPONS[me.weapon];
+      document.getElementById("wHUD").textContent = w.name;
+      const reserve = w.maxAmmo === Infinity ? "∞" : me.reserveAmmo;
+      document.getElementById("aHUD").textContent = me.isReloading ? "RECARGANDO..." : (me.ammoInMag + " / " + reserve);
+      document.getElementById("gHUD").textContent = "💣 x" + me.grenades;
+      document.getElementById("livesHUD").textContent = "Vidas: ∞ | Salud: " + Math.max(0, Math.round(me.health)) + "%";
+    }
+  }
+
+})();
+</script>
+</body>
+</html>

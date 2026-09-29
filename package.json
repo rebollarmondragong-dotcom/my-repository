@@ -1,0 +1,13 @@
+{
+  "name": "duelo-dividido-online",
+  "version": "1.0.0",
+  "description": "Juego multijugador 2D pixel art en tiempo real",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "socket.io": "^4.7.2"
+  }
+}
