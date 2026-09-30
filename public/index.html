@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Duelo Dividido Pixel Art - Multijugador Optimizado</title>
+<title>Duelo Dividido Pixel Art - Ultra Fluido</title>
 <style>
   :root{ --bg:#1a1714; --panel:#26211c; --line:#423930; --text:#f0e6d2; }
   *{box-sizing:border-box;}
@@ -70,8 +70,11 @@
   let isShooting = false;
   let mouseWorldAngle = 0;
 
-  // --- PREDICCIÓN LOCAL EN EL CLIENTE ---
+  // --- FISICAS LOCALES Y CÁMARA SUAVE ---
   let localPos = { x: 1900, y: 1100, vx: 0, vy: 0 };
+  let camPos = { x: 0, y: 0 };
+  let remotePlayers = {}; // Para interpolación suave de otros jugadores
+
   const SPEED = 2.8, FRICTION = 0.85, SIZE = 26, WALL = 30;
 
   window.addEventListener("keydown", e => {
@@ -122,15 +125,26 @@
     latestState = state;
     const me = state.players[socket.id];
     if (me && me.alive) {
-      // Corrección suave si la diferencia con el servidor es muy grande
       const dist = Math.hypot(localPos.x - me.x, localPos.y - me.y);
-      if (dist > 80) {
+      if (dist > 100) {
         localPos.x = me.x;
         localPos.y = me.y;
       } else {
-        // Interpolación (30% de ajuste por paquete)
-        localPos.x += (me.x - localPos.x) * 0.3;
-        localPos.y += (me.y - localPos.y) * 0.3;
+        localPos.x += (me.x - localPos.x) * 0.25;
+        localPos.y += (me.y - localPos.y) * 0.25;
+      }
+    }
+
+    // Guardar posiciones para interpolación de otros jugadores
+    for (const id in state.players) {
+      if (id !== socket.id) {
+        const p = state.players[id];
+        if (!remotePlayers[id]) {
+          remotePlayers[id] = { x: p.x, y: p.y };
+        } else {
+          remotePlayers[id].targetX = p.x;
+          remotePlayers[id].targetY = p.y;
+        }
       }
     }
   });
@@ -155,6 +169,15 @@
     localPos.y += localPos.vy;
     localPos.vx *= FRICTION;
     localPos.vy *= FRICTION;
+
+    // Suavizar movimiento de los demás jugadores (Interpolación)
+    for (const id in remotePlayers) {
+      const rp = remotePlayers[id];
+      if (rp.targetX !== undefined) {
+        rp.x += (rp.targetX - rp.x) * 0.2;
+        rp.y += (rp.targetY - rp.y) * 0.2;
+      }
+    }
   }
 
   function drawPixelRect(ctx, x, y, w, h, color, borderColor="#000"){
@@ -178,18 +201,22 @@
       const px = (me && me.alive) ? localPos.x : (me ? me.x : 0);
       const py = (me && me.alive) ? localPos.y : (me ? me.y : 0);
 
-      let camX = px - viewW / 2;
-      let camY = py - viewH / 2;
-      camX = Math.max(0, Math.min(latestState.world.w - viewW, camX));
-      camY = Math.max(0, Math.min(latestState.world.h - viewH, camY));
+      let targetCamX = px - viewW / 2;
+      let targetCamY = py - viewH / 2;
+      targetCamX = Math.max(0, Math.min(latestState.world.w - viewW, targetCamX));
+      targetCamY = Math.max(0, Math.min(latestState.world.h - viewH, targetCamY));
+
+      // Suavizado de Cámara (LERP)
+      camPos.x += (targetCamX - camPos.x) * 0.12;
+      camPos.y += (targetCamY - camPos.y) * 0.12;
 
       ctx.clearRect(0, 0, viewW, viewH);
       ctx.save();
-      ctx.translate(-Math.floor(camX), -Math.floor(camY));
+      ctx.translate(-Math.floor(camPos.x), -Math.floor(camPos.y));
 
       // Fondo y Casas
       ctx.fillStyle = "#d4b27d";
-      ctx.fillRect(camX, camY, viewW, viewH);
+      ctx.fillRect(camPos.x, camPos.y, viewW, viewH);
 
       for(const h of latestState.houses){
         ctx.fillStyle = h.floorColor;
@@ -233,7 +260,7 @@
         ctx.fillStyle = "#2ecc71"; ctx.fillRect(m.x - 3, m.y - 8, 6, 16); ctx.fillRect(m.x - 8, m.y - 3, 16, 6);
       }
 
-      // Projectiles
+      // Proyectiles y Explosiones
       for(const g of latestState.grenades) drawPixelRect(ctx, g.x-4, g.y-4, 8, 8, "#2d5a27", "#000");
       for(const e of latestState.explosions){
         ctx.fillStyle = "rgba(255, 90, 0, 0.65)"; ctx.beginPath(); ctx.arc(e.x, e.y, e.radius, 0, Math.PI * 2); ctx.fill();
@@ -247,9 +274,16 @@
         const pl = latestState.players[id];
         if(!pl.alive) continue;
 
-        // Si soy yo, uso la posición calculada localmente (0 ms lag)
-        const renderX = (id === socket.id) ? localPos.x : pl.x;
-        const renderY = (id === socket.id) ? localPos.y : pl.y;
+        let renderX = pl.x;
+        let renderY = pl.y;
+
+        if (id === socket.id) {
+          renderX = localPos.x;
+          renderY = localPos.y;
+        } else if (remotePlayers[id]) {
+          renderX = remotePlayers[id].x;
+          renderY = remotePlayers[id].y;
+        }
 
         ctx.save();
         ctx.translate(Math.floor(renderX), Math.floor(renderY));
