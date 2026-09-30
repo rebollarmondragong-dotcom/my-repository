@@ -436,7 +436,7 @@ setInterval(() => {
     bushes,
     world: { w: WORLD_W, h: WORLD_H }
   });
-}, 1000 / 60);
+}, 1000 / 30);
 
 server.listen(PORT, () => {
   console.log(`Servidor activo en el puerto ${PORT}`);
